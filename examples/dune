@@ -1,0 +1,14 @@
+(executable
+ (name fibonacci)
+ (modules fibonacci)
+ (libraries landmarks libexec libopt cmdliner))
+
+(library
+ (name libopt)
+ (modules libopt)
+ (libraries libexec jitpsi))
+
+(library
+ (name libexec)
+ (modules libexec)
+ (libraries stdint))
