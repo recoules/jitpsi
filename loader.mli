@@ -1,1 +1,2 @@
-val assemble_and_link : Obj.t array -> Lambda.program -> 'a
+val assemble_and_link :
+  Cmx_format.unit_infos -> Obj.t array -> Lambda.program -> 'a

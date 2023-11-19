@@ -278,8 +278,7 @@ let init_env witness env lambda =
               lambda )))
       env lambda
   in
-  Compilenv.cache_unit_info
-    Cmx_format.
+  ( Cmx_format.
       {
         ui_name = "Jitpsi";
         ui_symbol = "";
@@ -291,8 +290,8 @@ let init_env witness env lambda =
         ui_send_fun = [];
         ui_export_info = Clambda (Value_tuple approx);
         ui_force_link = false;
-      };
-  ( binding,
+      },
+    binding,
     Lambda.Llet
       ( Strict,
         Pgenval,
@@ -314,7 +313,7 @@ let rec make_body locals revlet lambda =
 let return (Lambda { env; locals; revlet; params; _ } : ('a, lambda) t) : 'a =
   let label = Ident.create_local (keygen ()) in
   let root = Ident.create_local "jitpsi__root" in
-  let binding, code =
+  let cmx, binding, code =
     init_env root env
       Lambda.(
         lfunction ~kind:Curried ~params ~return:Pgenval
@@ -344,7 +343,7 @@ let return (Lambda { env; locals; revlet; params; _ } : ('a, lambda) t) : 'a =
         code;
       }
   in
-  Loader.assemble_and_link binding lambda_program
+  Loader.assemble_and_link cmx binding lambda_program
 
 let ( @@ ) : (unit, value) t -> ('b, value) t -> ('b, value) t = sequence
 

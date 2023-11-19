@@ -14,8 +14,12 @@ let backend =
       Proc.max_arguments_for_tailcalls - 1
   end : Backend_intf.S)
 
-let assemble_and_link binding lambda_program =
+let assemble_and_link cmx binding lambda_program =
   let output : 'a option ref = ref None in
+  Profile.reset ();
+  Compilenv.reset "";
+  Compilenv.cache_unit_info cmx;
+  Backend_var.reinit ();
   X86_proc.with_internal_assembler (X86_emitter.generate_asm output binding)
     (fun () ->
       Asmgen.compile_implementation ~backend ~prefixname:""
