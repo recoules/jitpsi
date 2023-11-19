@@ -391,7 +391,8 @@ let rec read_program output binding (target : Symbol.t)
       | Scan | Function _ ->
           raise (Failure "failed to find the target function")
       | Loaded { root; base; labels } ->
-          build_frame root base labels program (Bytes.create 128) 8 0 false)
+          build_frame root base labels program (Bytes.create 128) 8 0 false;
+          Option.get output)
   (* assembly function *)
   | Align (_, align) :: Global sym :: NewLabel (name, _) :: program when in_text
     ->
@@ -501,8 +502,7 @@ and exec_program output binding target (program : X86_ast.asm_program) root
       R.set_obj registers RAX root;
       exec_program output binding target program root registers
   | Ins RET :: program ->
-      output := Some (R.get_obj registers RAX);
-      read_program output binding target program true
+      read_program (Some (R.get_obj registers RAX)) binding target program true
   | Ins _ :: _ -> raise (Failure "[link] unexpected instruction")
   (* ignore *)
   | ( File _ | Align _ | Loc _ | Comment _ | Global _ | NewLabel _
@@ -622,5 +622,5 @@ and build_frame =
     (* masm only *)
     | (Model _ | Mode386 | External _) :: _ -> assert false
 
-let generate_asm output binding (program : X86_ast.asm_program) _ =
-  read_program output binding Symbol.Scan program false
+let generate_asm binding (program : X86_ast.asm_program) =
+  read_program None binding Symbol.Scan program false

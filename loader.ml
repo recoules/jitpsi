@@ -15,14 +15,17 @@ let backend =
   end : Backend_intf.S)
 
 let assemble_and_link cmx binding lambda_program =
-  let output : 'a option ref = ref None in
   Profile.reset ();
   Compilenv.reset "";
   Compilenv.cache_unit_info cmx;
   Backend_var.reinit ();
-  X86_proc.with_internal_assembler (X86_emitter.generate_asm output binding)
+  let output : 'a option ref = ref None in
+  X86_proc.with_internal_assembler
+    (fun x86_asm _ -> output := Some x86_asm)
     (fun () ->
       Asmgen.compile_implementation ~backend ~prefixname:""
         ~middle_end:Closure_middle_end.lambda_to_clambda
-        ~ppf_dump:Format.err_formatter lambda_program;
-      match !output with None -> raise (Failure "return") | Some a -> a)
+        ~ppf_dump:Format.err_formatter lambda_program);
+  match !output with
+  | None -> raise (Failure "return")
+  | Some x86_asm -> X86_emitter.generate_asm binding x86_asm
