@@ -241,13 +241,13 @@ let closure_closed obj =
   let info : int = Obj.magic (Obj.field obj 1) in
   info lsr (Sys.int_size - 8) <> 1 || size = 2
 
+let global =
+  Lambda.Lprim (Pgetglobal (Ident.create_persistent "Jitpsi"), [], Loc_unknown)
+
 let init_env witness env lambda =
   let n = Ident.Map.cardinal env in
-  let binding = Array.make n (Obj.repr 0) in
-  let approx = Array.make n Clambda.Value_unknown in
-  let global =
-    Lambda.Lprim (Pgetglobal (Ident.create_persistent "Jitpsi"), [], Loc_unknown)
-  in
+  let binding = Array.make (n + 1) (Obj.repr 0) in
+  let approx = Array.make (n + 1) Clambda.Value_unknown in
   let pos = ref (-1) in
   let lambda =
     Ident.Map.fold
@@ -278,6 +278,18 @@ let init_env witness env lambda =
               lambda )))
       env lambda
   in
+  incr pos;
+  Array.set approx !pos
+    (Value_closure
+       ( {
+           fun_label = Printf.sprintf "jitpsi__ret";
+           fun_arity = 1;
+           fun_closed = false;
+           fun_inline = None;
+           fun_float_const_prop = false;
+           fun_poll = Default_poll;
+         },
+         Value_unknown ));
   ( Cmx_format.
       {
         ui_name = "Jitpsi";
@@ -291,15 +303,12 @@ let init_env witness env lambda =
         ui_export_info = Clambda (Value_tuple approx);
         ui_force_link = false;
       },
-    binding,
+    Array.sub binding 0 (!pos + 1),
     Lambda.Llet
       ( Strict,
         Pgenval,
         witness,
-        Lambda.Lprim
-          ( Pccall (Primitive.simple ~name:"jitpsi__root" ~arity:0 ~alloc:false),
-            [],
-            Loc_unknown ),
+        Lprim (Pfield !pos, [ global ], Loc_unknown),
         lambda ) )
 
 let rec make_body locals revlet lambda =
@@ -318,10 +327,16 @@ let return (Lambda { env; locals; revlet; params; _ } : ('a, lambda) t) : 'a =
       Lambda.(
         lfunction ~kind:Curried ~params ~return:Pgenval
           ~body:
-            (Lsequence
-               ( Lprim (Pignore, [ Lvar root ], Loc_unknown),
-                 make_body locals (List.tl revlet)
-                   (Ident.Map.find (List.hd revlet) locals) ))
+            (make_body locals (List.tl revlet)
+               (Lapply
+                  {
+                    ap_func = Lvar root;
+                    ap_args = [ Ident.Map.find (List.hd revlet) locals ];
+                    ap_loc = Loc_unknown;
+                    ap_tailcall = Tailcall_expectation true;
+                    ap_inlined = Default_inline;
+                    ap_specialised = Default_specialise;
+                  }))
           ~attr:
             {
               inline = Never_inline;

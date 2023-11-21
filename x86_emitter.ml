@@ -20,7 +20,7 @@ end
 module Symbol = struct
   module Map = Map.Make (String)
 
-  type t =
+  type 'a t =
     | Scan
     | Function of {
         name : string;
@@ -30,6 +30,7 @@ module Symbol = struct
         labels : int Map.t;
       }
     | Loaded of { root : Root.t; base : int; labels : int Map.t }
+    | Closed of { root : Root.t; base : int; labels : int Map.t; f : 'a }
 end
 
 module R = struct
@@ -313,12 +314,6 @@ module Assembly = struct
       ->
         push_mod_idx_reg64 0b1000 "\x8d" (R.num idx) displ (R.num r) t
     | RET -> push_byte '\xc3' t
-    (* | i when true ->
-     *     raise
-     *       (Failure
-     *          (Format.sprintf "[assemble] unexpected %d"
-     *             (if Obj.is_int (Obj.repr i) then -Obj.magic i
-     *             else Obj.tag (Obj.repr i)))) *)
     | _ -> raise (Failure "[assemble] unexpected instruction")
 
   let align =
@@ -365,7 +360,81 @@ module Assembly = struct
       }
 end
 
-let rec read_program output binding (target : Symbol.t)
+module Lbuffer = struct
+  type t = { buf : X86_ast.asm_line array; mutable i : int; mutable j : int }
+
+  let create () = { buf = Array.make 8 X86_ast.Cfi_endproc; i = 0; j = 0 }
+
+  let assemble (line : X86_ast.asm_line) asm =
+    match line with
+    | NewLabel (name, _) -> Assembly.record name asm
+    | Ins ins -> Assembly.push ins asm
+    | Align (_, n) -> Assembly.align n asm
+    | _ -> ()
+
+  let incr x = (x + 1) land 0x7
+  let decr x = (x - 1) land 0x7
+
+  let push line asm t =
+    let i' = incr t.i in
+    if i' = t.j then (
+      assemble (Array.get t.buf t.j) asm;
+      t.j <- incr t.j);
+    Array.set t.buf t.i line;
+    t.i <- i'
+
+  let flush asm t =
+    while t.i <> t.j do
+      assemble (Array.get t.buf t.j) asm;
+      t.j <- incr t.j
+    done
+
+  type target =
+    | Restore_stack
+    | Set_Arg of bool
+    | Get_closure of X86_ast.reg64 * bool
+    | Tailcall
+
+  let finalize_return asm t ret =
+    flush asm t;
+    Assembly.push ret asm
+
+  let rec rewind_return asm t target i =
+    if i = t.j then finalize_return asm t RET
+    else
+      let i = decr i in
+      let line = Array.get t.buf i in
+      match (target, line) with
+      | Restore_stack, Ins (ADD (Imm _, Reg64 RSP)) ->
+          rewind_return asm t (Set_Arg true) i
+      | Set_Arg _, Ins (MOV (_, Reg64 RAX)) ->
+          rewind_return asm t (Set_Arg false) i
+      | ( Set_Arg tailcall,
+          Ins
+            (MOV
+              (Mem { idx; scale = 1; base = None; sym = None; _ }, Reg64 RBX)) )
+        ->
+          Array.set t.buf i Cfi_endproc;
+          rewind_return asm t (Get_closure (idx, tailcall)) i
+      | Get_closure (idx, tailcall), Ins (MOV (_, Reg64 idx')) when idx = idx'
+        ->
+          Array.set t.buf i Cfi_endproc;
+          if tailcall then rewind_return asm t Tailcall i
+          else finalize_return asm t RET
+      | Tailcall, NewLabel _ -> (
+          let i' = decr i in
+          match Array.get t.buf i' with
+          | Ins (CALL (Sym _ as sym)) ->
+              Array.set t.buf i Cfi_endproc;
+              Array.set t.buf i' Cfi_endproc;
+              finalize_return asm t (JMP sym)
+          | _ -> finalize_return asm t RET)
+      | _, _ -> finalize_return asm t RET
+
+  let optimize_return asm t = rewind_return asm t Restore_stack t.i
+end
+
+let rec read_program binding (target : 'a Symbol.t)
     (program : X86_ast.asm_program) in_text =
   match program with
   | [] -> raise (Failure "unexpected end of program")
@@ -377,12 +446,14 @@ let rec read_program output binding (target : Symbol.t)
   | (Model _ | Mode386 | External _) :: _ -> assert false
   (* text section *)
   | Section ([ ".text" ], _, _) :: program ->
-      read_program output binding target program true
+      read_program binding target program true
   (* other sections *)
-  | Section _ :: program -> read_program output binding target program false
+  | Section _ :: program -> read_program binding target program false
   (* entry point *)
   | Align _ :: Global "caml__entry" :: NewLabel ("caml__entry", _) :: program ->
-      exec_program output binding target program (Root.create ()) (R.create ())
+      let root = Root.create () in
+      Array.set binding (Array.length binding - 1) (Obj.repr root);
+      exec_program binding target program root (R.create ())
   | Align (_, 8)
     :: Global "caml__frametable"
     :: NewLabel ("caml__frametable", _)
@@ -390,26 +461,27 @@ let rec read_program output binding (target : Symbol.t)
       match target with
       | Scan | Function _ ->
           raise (Failure "failed to find the target function")
-      | Loaded { root; base; labels } ->
+      | Loaded _ -> raise (Failure "failed to close the target function")
+      | Closed { root; base; labels; f } ->
           build_frame root base labels program (Bytes.create 128) 8 0 false;
-          Option.get output)
+          f)
   (* assembly function *)
   | Align (_, align) :: Global sym :: NewLabel (name, _) :: program when in_text
     ->
       assert (String.equal sym name);
       assert (target = Symbol.Scan);
-      assemble_function output binding target program
+      assemble_function binding target program
         (Assembly.make name align binding)
+        (Lbuffer.create ())
   (* ignore *)
   | ( NewLabel _ | Align _ | Ins _ | File _ | Loc _ | Comment _ | Global _
     | Private_extern _ | Size _ | Type _ | Cfi_startproc
     | Cfi_adjust_cfa_offset _ | Cfi_endproc | Byte _ | Word _ | Long _ | Quad _
     | Bytes _ | Space _ )
     :: program ->
-      read_program output binding target program in_text
+      read_program binding target program in_text
 
-and exec_program output binding target (program : X86_ast.asm_program) root
-    registers =
+and exec_program binding target (program : X86_ast.asm_program) root registers =
   match program with
   | [] -> raise (Failure "missing 'ret'")
   | Ins (SUB (Imm i, Reg64 R15))
@@ -437,13 +509,13 @@ and exec_program output binding target (program : X86_ast.asm_program) root
       let tag : int = Int64.to_int i' land 0xff in
       assert (d = d' && Int64.to_int i' lsr 10 = size);
       R.set_obj registers d (Obj.new_block tag size);
-      exec_program output binding target program root registers
+      exec_program binding target program root registers
   | Ins (MOV (Reg64 s, Reg64 d)) :: program ->
       R.set registers d (R.get registers s);
-      exec_program output binding target program root registers
+      exec_program binding target program root registers
   | Ins (MOV (Imm i, Reg64 r)) :: program ->
       R.set_raw registers r (Int64.to_nativeint i);
-      exec_program output binding target program root registers
+      exec_program binding target program root registers
   | Ins
       (MOV
         ( Imm i,
@@ -452,7 +524,7 @@ and exec_program output binding target (program : X86_ast.asm_program) root
     :: program ->
       Obj.set_raw_field (R.get_obj registers idx) (displ asr 3)
         (Int64.to_nativeint i);
-      exec_program output binding target program root registers
+      exec_program binding target program root registers
   | Ins
       (MOV
         ( Reg64 s,
@@ -463,7 +535,7 @@ and exec_program output binding target (program : X86_ast.asm_program) root
       (match R.get registers s with
       | Obj v -> Obj.set_field b (displ asr 3) v
       | Raw x -> Obj.set_raw_field b (displ asr 3) x);
-      exec_program output binding target program root registers
+      exec_program binding target program root registers
   | Ins
       (MOV
         ( Mem { typ = QWORD; sym = None; base = None; scale = 1; idx; displ; _ },
@@ -471,10 +543,10 @@ and exec_program output binding target (program : X86_ast.asm_program) root
     :: program ->
       let b = R.get_obj registers idx in
       R.set_any registers d (Obj.field b (displ asr 3));
-      exec_program output binding target program root registers
+      exec_program binding target program root registers
   | Ins (MOV (Mem64_RIP (QWORD, "caml@GOTPCREL", 0), Reg64 r)) :: program ->
       R.set_obj registers r (Obj.repr binding);
-      exec_program output binding target program root registers
+      exec_program binding target program root registers
   | Ins (MOV (Mem64_RIP (QWORD, name, 0), Reg64 r)) :: program -> (
       assert (String.ends_with ~suffix:"@GOTPCREL" name);
       let sym = String.sub name 0 (String.length name - 9) in
@@ -484,32 +556,35 @@ and exec_program output binding target (program : X86_ast.asm_program) root
         when String.equal sym name ->
           let addr = Root.load_code shellcode ~bytesize ~align root in
           R.set_raw registers r (Nativeint.of_int addr);
-          exec_program output binding
+          exec_program binding
             (Loaded { root; base = addr; labels })
             program root registers
       | Function _ | Loaded _ ->
           let value = Root.global_symbol sym in
           if Int64.equal Int64.zero value then raise (Failure name);
           R.set_raw registers r (Int64.to_nativeint value);
-          exec_program output binding target program root registers)
+          exec_program binding target program root registers
+      | Closed _ -> assert false)
   | Ins (SUB (Imm i, Reg64 RSP)) :: program ->
       R.set_obj registers RSP (Obj.new_block 0 (Int64.to_int i lsr 3));
-      exec_program output binding target program root registers
+      exec_program binding target program root registers
   | Ins (ADD (Imm _, Reg64 RSP)) :: program ->
       R.set_obj registers RSP (Obj.repr 0);
-      exec_program output binding target program root registers
-  | Ins (CALL (Sym "jitpsi__root@PLT")) :: program ->
-      R.set_obj registers RAX root;
-      exec_program output binding target program root registers
-  | Ins RET :: program ->
-      read_program (Some (R.get_obj registers RAX)) binding target program true
+      exec_program binding target program root registers
+  | Ins RET :: program -> (
+      match target with
+      | Scan | Function _ | Closed _ -> assert false
+      | Loaded { root; base; labels } ->
+          read_program binding
+            (Closed { root; base; labels; f = R.get_obj registers RAX })
+            program true)
   | Ins _ :: _ -> raise (Failure "[link] unexpected instruction")
   (* ignore *)
   | ( File _ | Align _ | Loc _ | Comment _ | Global _ | NewLabel _
     | Private_extern _ | Size _ | Type _ | Cfi_startproc
     | Cfi_adjust_cfa_offset _ | Cfi_endproc )
     :: program ->
-      exec_program output binding target program root registers
+      exec_program binding target program root registers
   | Section _ :: _ -> raise (Failure "section before 'ret'")
   (* unknown *)
   | Indirect_symbol _ :: _ ->
@@ -520,26 +595,24 @@ and exec_program output binding target (program : X86_ast.asm_program) root
   (* masm only *)
   | (Model _ | Mode386 | External _) :: _ -> assert false
 
-and assemble_function output binding target (program : X86_ast.asm_program)
-    (assembly : Assembly.t) =
+and assemble_function binding target (program : X86_ast.asm_program)
+    (assembly : Assembly.t) lbuf =
   match program with
   | [] -> raise (Failure "'.size' is missing")
   | Size (name, _) :: program ->
       assert (String.equal assembly.name name);
-      read_program output binding (Assembly.emit assembly) program true
-  | NewLabel (name, _) :: program ->
-      Assembly.record name assembly;
-      assemble_function output binding target program assembly
-  | Ins ins :: program ->
-      Assembly.push ins assembly;
-      assemble_function output binding target program assembly
-  | Align (_, n) :: program ->
-      Assembly.align n assembly;
-      assemble_function output binding target program assembly
+      Lbuffer.flush assembly lbuf;
+      read_program binding (Assembly.emit assembly) program true
+  | Ins (JMP (Sym "jitpsi__ret@PLT")) :: program ->
+      Lbuffer.optimize_return assembly lbuf;
+      assemble_function binding target program assembly lbuf
+  | ((NewLabel _ | Ins _ | Align _) as line) :: program ->
+      Lbuffer.push line assembly lbuf;
+      assemble_function binding target program assembly lbuf
   | ( Loc _ | Comment _ | Type _ | Cfi_startproc | Cfi_adjust_cfa_offset _
     | Cfi_endproc )
     :: program ->
-      assemble_function output binding target program assembly
+      assemble_function binding target program assembly lbuf
   | (File _ | Section _ | Global _ | Private_extern _) :: _ ->
       raise (Failure "unexpected directive in function")
   (* unknown *)
@@ -623,4 +696,4 @@ and build_frame =
     | (Model _ | Mode386 | External _) :: _ -> assert false
 
 let generate_asm binding (program : X86_ast.asm_program) =
-  read_program None binding Symbol.Scan program false
+  read_program binding Symbol.Scan program false
