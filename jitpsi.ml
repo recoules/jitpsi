@@ -282,7 +282,7 @@ let init_env witness env lambda =
   Array.set approx !pos
     (Value_closure
        ( {
-           fun_label = Printf.sprintf "jitpsi__ret";
+           fun_label = "jitpsi__ret";
            fun_arity = 1;
            fun_closed = false;
            fun_inline = None;

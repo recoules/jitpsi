@@ -34,6 +34,7 @@ For instance, we can write a generator of `power`'s function.
 ```ocaml
 let rec jpower n x =
   if n = 0 then Jitpsi.const 1
+  else if n = 1 then x
   else if n mod 2 = 0 then 
     Jitpsi.apply (Jitpsi.const square) (jpower (n / 2) x)
   else Jitpsi.apply2 (Jitpsi.const ( * )) x (jpower (n - 1) x)
@@ -59,4 +60,4 @@ power7 2;;
 An example of specialization for a toy interpreter can be found in the directory [examples](examples).
 
 As a more advanced example, JITPSI has been used to optimize the symbolic execution of the [BINSEC](https://github.com/binsec/binsec) plateform.
-The branch [jitpsi](https://github.com/binsec/binsec/tree/jitpsi) shows a significant performance boost for the [fibonacci](https://github.com/binsec/binsec/tree/jitpsi/examples/sse/fibonacci) (+100%) and [licorne](https://github.com/binsec/binsec/tree/jitpsi/examples/sse/fcsc/2022.licorne) (+40%) when using the flag `-sse-jit`.
+The branch [jitpsi](https://github.com/binsec/binsec/tree/jitpsi) shows a significant performance boost for the [fibonacci](https://github.com/binsec/binsec/tree/jitpsi/examples/sse/fibonacci) (+100%) and [licorne](https://github.com/binsec/binsec/tree/jitpsi/examples/sse/fcsc/2022.licorne) (+40%) examples when using the flag `-sse-jit`.
